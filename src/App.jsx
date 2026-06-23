@@ -984,6 +984,8 @@ function TypingRow() {
 }
 
 function ErrorBanner({ text }) {
+  const t = (text || "").toLowerCase();
+  const isTimeout = t.includes("504") || t.includes("timeout") || t.includes("таймаут") || t.includes("gateway");
   return (
     <div style={styles.agentRow}>
       <AgentAvatar />
@@ -992,7 +994,9 @@ function ErrorBanner({ text }) {
           <div style={styles.errorTitle}>Не удалось получить ответ</div>
           <div style={styles.errorText}>{text}</div>
           <div style={styles.errorHint}>
-            Частая причина — ключ. Нажми «🔑 Ключ» вверху, чтобы проверить или указать другой.
+            {isTimeout
+              ? "Сервер не успел ответить вовремя (долгая генерация большого документа). Попробуй ещё раз или сформулируй задачу покороче."
+              : "Частая причина — ключ. Нажми «🔑 Ключ» вверху, чтобы проверить или указать другой."}
           </div>
         </div>
       </div>
