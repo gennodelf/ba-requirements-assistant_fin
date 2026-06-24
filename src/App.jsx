@@ -18,13 +18,36 @@ const SAMPLE_INPUT = `Созвон с продактом по FBP — нужно
 
 const ALL_AVAILABLE_BLOCKS = [
   "Контекст", "Цель", "Scope", "Роли", "AS-IS/TO-BE", "Сценарии",
-  "Бизнес-правила", "ФТ", "Открытые вопросы",
+  "Бизнес-правила", "Функциональные требования", "Открытые вопросы",
   "Термины и определения", "Статусы и жизненный цикл", "Финансовые требования",
-  "UI/UX", "Интеграционные требования", "НФТ", "Логи, аудит и аналитика",
-  "Миграция и запуск", "Админка / операционный контур", "Уведомления",
-  "Security / permissions", "Legal / compliance", "QA checklist",
+  "UI/UX", "Интеграционные требования", "Нефункциональные требования",
+  "Логи, аудит и аналитика", "Миграция и запуск", "Админка / операционный контур",
+  "Уведомления", "Security / permissions", "Legal / compliance", "QA checklist",
   "Rollout plan", "Risk register",
 ];
+
+// Нормализация имени блока (без регистра, пунктуации и пробелов) — чтобы
+// «ФТ» / «Функциональные требования» / «Scope / Out of Scope» сравнивались корректно.
+const normBlock = (s) => (s || "").toLowerCase().replace(/[^a-zа-яё0-9]/gi, "");
+
+// «блок уже есть среди names» — пересечение норм-имён в любую сторону (одно содержит другое)
+function blockAlreadyIn(block, names) {
+  const nb = normBlock(block);
+  if (!nb) return false;
+  return (names || [])
+    .map(normBlock)
+    .filter(Boolean)
+    .some((n) => n.includes(nb) || nb.includes(n));
+}
+
+// Заголовки разделов из готового документа (## …), без ведущей нумерации «7. »
+function docHeadings(md) {
+  return (md || "")
+    .split("\n")
+    .map((l) => l.match(/^#{1,3}\s+(.+)/))
+    .filter(Boolean)
+    .map((m) => m[1].replace(/^\d+[.)]\s*/, "").trim());
+}
 
 // Уникальный ID, не сбрасывается между перезагрузками (иначе чаты конфликтуют по id)
 const uid = () =>
@@ -166,57 +189,80 @@ function parseEnvelope(raw, streaming) {
   return { kind: "message", markdown: fallback };
 }
 
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Временные сбои, которые имеет смысл повторить (перегрузка, лимит, сетевой сбой,
+// «пробуждение» сервера). Таймаут/504 НЕ повторяем — это была долгая генерация.
+function isRetriable(msg) {
+  const m = (msg || "").toLowerCase();
+  return /overloaded|rate.?limit|429|529|\b500\b|internal server|fetch failed|failed to fetch|load failed/.test(m);
+}
+
 async function streamChat(apiMessages, onText, auth) {
   const headers = { "Content-Type": "application/json" };
   if (auth?.mode === "password") headers["x-app-password"] = auth.value;
   else if (auth?.mode === "key") headers["x-user-api-key"] = auth.value;
-  const resp = await fetch("/api/chat", {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ messages: apiMessages }),
-  });
-  if (!resp.ok || !resp.body) {
-    let msg = `Ошибка ${resp.status}`;
+  const body = JSON.stringify({ messages: apiMessages });
+
+  for (let attempt = 0; ; attempt++) {
+    let resp;
     try {
-      const j = await resp.json();
-      msg = j.error || msg;
-    } catch {
-      /* тело не JSON */
-    }
-    throw new Error(msg);
-  }
-
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let full = "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const line of lines) {
-      const t = line.trim();
-      if (!t.startsWith("data:")) continue;
-      const d = t.slice(5).trim();
-      if (!d || d === "[DONE]") continue;
-      let evt;
-      try {
-        evt = JSON.parse(d);
-      } catch {
+      resp = await fetch("/api/chat", { method: "POST", headers, body });
+    } catch (e) {
+      if (attempt < 2) {
+        await wait(2000 * (attempt + 1));
         continue;
       }
-      if (evt.type === "content_block_delta" && evt.delta?.type === "text_delta") {
-        full += evt.delta.text;
-        onText(full);
-      } else if (evt.type === "error") {
-        throw new Error(evt.error?.message || "Ошибка потока");
+      throw new Error(e?.message || "fetch failed", { cause: e });
+    }
+
+    if (!resp.ok || !resp.body) {
+      let msg = `Ошибка ${resp.status}`;
+      try {
+        const j = await resp.json();
+        msg = j.error || msg;
+      } catch {
+        /* тело не JSON */
+      }
+      if (isRetriable(msg) && attempt < 2) {
+        await wait(2000 * (attempt + 1));
+        continue;
+      }
+      throw new Error(msg);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let full = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t.startsWith("data:")) continue;
+        const d = t.slice(5).trim();
+        if (!d || d === "[DONE]") continue;
+        let evt;
+        try {
+          evt = JSON.parse(d);
+        } catch {
+          continue;
+        }
+        if (evt.type === "content_block_delta" && evt.delta?.type === "text_delta") {
+          full += evt.delta.text;
+          onText(full);
+        } else if (evt.type === "error") {
+          throw new Error(evt.error?.message || "Ошибка потока");
+        }
       }
     }
+    return full;
   }
-  return full;
 }
 
 // История для API: user → текст (+ вложения), assistant → его «сырой» ответ с меткой
@@ -512,8 +558,12 @@ export default function App() {
     setAttachments((prev) => prev.filter((f) => f.id !== id));
   }
 
-  function fillComposer(text) {
-    setComposer(text);
+  // #3: добавление раздела к готовому документу — НАКАПЛИВАЕМ запросы, а не перезаписываем
+  function addBlockToComposer(tag) {
+    setComposer((prev) => {
+      const phrase = `Добавь раздел «${tag}».`;
+      return prev.trim() ? prev.trim() + " " + phrase : phrase;
+    });
     composerRef.current?.focus();
   }
 
@@ -577,9 +627,12 @@ export default function App() {
                       <AgentMessage
                         key={m.id}
                         message={m}
-                        onConfirmStructure={(blocks) =>
+                        onConfirmStructure={({ include, exclude }) =>
                           send(
-                            `Структура подтверждена. Включи в документ блоки: ${blocks.join(", ")}. ` +
+                            `Структура подтверждена. Собери документ СТРОГО из этих разделов: ${include.join(", ")}. ` +
+                              (exclude.length
+                                ? `НЕ включай разделы: ${exclude.join(", ")}. Не добавляй других разделов сверх списка. `
+                                : "") +
                               `Если остались критичные вопросы — задай их; иначе подготовь черновик документа.`
                           )
                         }
@@ -615,7 +668,7 @@ export default function App() {
               onSelect={setActiveDocId}
               onRequestDelete={requestDeleteVersion}
               onRenameVersion={renameVersion}
-              onNeedMore={fillComposer}
+              onAddBlock={addBlockToComposer}
             />
           )}
         </div>
@@ -983,21 +1036,42 @@ function TypingRow() {
   );
 }
 
-function ErrorBanner({ text }) {
+// Понятное описание по тексту ошибки (а не одна заглушка про ключ)
+function errorInfo(text) {
   const t = (text || "").toLowerCase();
-  const isTimeout = t.includes("504") || t.includes("timeout") || t.includes("таймаут") || t.includes("gateway");
+  const has = (s) => t.includes(s);
+  if (has("overloaded"))
+    return "Серверы Anthropic сейчас перегружены. Подожди минуту и отправь ещё раз — обычно проходит со 2-й попытки.";
+  if (has("credit balance") || has("too low") || has("billing"))
+    return "Закончились кредиты Anthropic. Пополни баланс: console.anthropic.com → Billing → Buy credits.";
+  if (has("rate") || has("429"))
+    return "Слишком много запросов подряд. Сделай паузу 10–20 секунд и попробуй снова.";
+  if (has("неверный пароль"))
+    return "Пароль не подошёл. Нажми «🔑 Ключ» и введи правильный (или войди своим ключом).";
+  if (has("не указан"))
+    return "Нужно войти. Нажми «🔑 Ключ» вверху — своим ключом или по паролю.";
+  if (has("invalid x-api-key") || has("authentication") || has("ключ не подошёл") || has("api key"))
+    return "Ключ не подошёл. Нажми «🔑 Ключ» вверху и вставь рабочий.";
+  if (has("could not process") || has("image"))
+    return "Не удалось прочитать файл. Проверь, что он целый и не больше 10 МБ, или убери его.";
+  if (has("504") || has("timeout") || has("таймаут") || has("gateway"))
+    return "Сервер не успел ответить (документ слишком долго готовился). Попробуй ещё раз или сформулируй задачу покороче.";
+  if (has("fetch failed") || has("failed to fetch") || has("load failed") || has("network"))
+    return "Сервер недоступен. Если это первый запрос за долгое время — он «просыпается», подожди ~30 сек и повтори.";
+  if (has("internal server") || has("500"))
+    return "Временный сбой на стороне Anthropic. Подожди немного и повтори.";
+  return "Попробуй ещё раз. Если повторяется — проверь ключ («🔑 Ключ») и баланс Anthropic.";
+}
+
+function ErrorBanner({ text }) {
   return (
     <div style={styles.agentRow}>
       <AgentAvatar />
       <div style={styles.agentCol}>
         <div style={styles.errorCard}>
           <div style={styles.errorTitle}>Не удалось получить ответ</div>
-          <div style={styles.errorText}>{text}</div>
-          <div style={styles.errorHint}>
-            {isTimeout
-              ? "Сервер не успел ответить вовремя (долгая генерация большого документа). Попробуй ещё раз или сформулируй задачу покороче."
-              : "Частая причина — ключ. Нажми «🔑 Ключ» вверху, чтобы проверить или указать другой."}
-          </div>
+          <div style={styles.errorText}>{errorInfo(text)}</div>
+          <div style={styles.errorHint}>Техническая ошибка: {text}</div>
         </div>
       </div>
     </div>
@@ -1066,15 +1140,17 @@ function ClassificationCard({ data, onConfirm }) {
     setPickerOpen(false);
   };
 
-  // Исключаем уже выведенные блоки (и активные, и неактивные). Нормализуем,
-  // чтобы «Открытые вопросы» и «Открытые вопросы.» считались одним.
-  const _norm = (s) => s.toLowerCase().replace(/[^a-zа-яё0-9]/gi, "");
-  const _shownNorm = new Set(shown.map(_norm));
-  const availableToAdd = ALL_AVAILABLE_BLOCKS.filter((b) => !_shownNorm.has(_norm(b)));
+  // #4: в «+ добавить блок» не показываем уже выведенные (активные и неактивные),
+  // с учётом синонимов (ФТ ↔ Функциональные требования, Scope ↔ Scope / Out of Scope).
+  const availableToAdd = ALL_AVAILABLE_BLOCKS.filter((b) => !blockAlreadyIn(b, shown));
 
+  // #2: при подтверждении шлём и включённые, и снятые блоки — чтобы модель собрала
+  // документ ТОЛЬКО из активных и не тащила снятые из своей методички.
   const handleConfirm = () => {
     setConfirmed(true);
-    onConfirm?.([...active]);
+    const include = [...active];
+    const exclude = shown.filter((t) => !active.has(t));
+    onConfirm?.({ include, exclude });
   };
 
   return (
@@ -1265,7 +1341,7 @@ function DocRef({ title, streaming, onOpen }) {
   );
 }
 
-function DocumentPanel({ documents, selectedId, onSelect, onRequestDelete, onRenameVersion, onNeedMore }) {
+function DocumentPanel({ documents, selectedId, onSelect, onRequestDelete, onRenameVersion, onAddBlock }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [headerCopied, setHeaderCopied] = useState(false);
@@ -1313,10 +1389,15 @@ function DocumentPanel({ documents, selectedId, onSelect, onRequestDelete, onRen
     }
   };
 
+  // #3: добавляем раздел и НЕ закрываем список — можно выбрать несколько подряд (накапливаются)
   const pickBlock = (tag) => {
-    onNeedMore(`Добавь раздел «${tag}»: `);
-    setPickerOpen(false);
+    onAddBlock(tag);
   };
+
+  // #4: не предлагаем разделы, которые уже есть в открытом документе
+  const availableBlocks = ALL_AVAILABLE_BLOCKS.filter(
+    (b) => !blockAlreadyIn(b, docHeadings(selected?.markdown))
+  );
 
   return (
     <div style={styles.docPanel}>
@@ -1405,18 +1486,24 @@ function DocumentPanel({ documents, selectedId, onSelect, onRequestDelete, onRen
 
       {selected && !selected.streaming && (
         <div style={styles.docPanelFoot}>
-          <span style={styles.docFootHint}>Нужны правки? Напиши в чате или добавь раздел:</span>
+          <span style={styles.docFootHint}>
+            Нужны правки? Напиши в чате или добавь раздел (можно несколько — копятся в поле ввода):
+          </span>
           <div style={styles.addTagWrap}>
             <button style={styles.tagAdd} onClick={() => setPickerOpen((v) => !v)}>
               + добавить блок
             </button>
             {pickerOpen && (
               <div style={{ ...styles.picker, top: "auto", bottom: "calc(100% + 6px)" }}>
-                {ALL_AVAILABLE_BLOCKS.map((tag) => (
-                  <button key={tag} style={styles.pickerItem} onClick={() => pickBlock(tag)}>
-                    {tag}
-                  </button>
-                ))}
+                {availableBlocks.length === 0 ? (
+                  <div style={styles.pickerEmpty}>Все разделы уже есть в документе</div>
+                ) : (
+                  availableBlocks.map((tag) => (
+                    <button key={tag} style={styles.pickerItem} onClick={() => pickBlock(tag)}>
+                      + {tag}
+                    </button>
+                  ))
+                )}
               </div>
             )}
           </div>
