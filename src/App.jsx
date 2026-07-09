@@ -269,7 +269,7 @@ async function streamChat(apiMessages, onText, auth) {
 function toApi(m) {
   if (m.role !== "user") return { role: "assistant", content: m.raw };
 
-  const files = (m.files || []).filter((f) => f.data); // только с данными (после перезагрузки данных нет)
+  const files = (m.files || []).filter((f) => f.data || f.text); // только с данными (после перезагрузки их нет)
   if (files.length === 0) return { role: "user", content: m.content };
 
   const blocks = [];
@@ -278,25 +278,40 @@ function toApi(m) {
       blocks.push({ type: "image", source: { type: "base64", media_type: f.mediaType, data: f.data } });
     } else if (f.kind === "pdf") {
       blocks.push({ type: "document", source: { type: "base64", media_type: "application/pdf", data: f.data } });
+    } else if (f.kind === "text") {
+      blocks.push({ type: "text", text: `Приложенный файл «${f.name}»:\n\n${f.text}` });
     }
   }
   blocks.push({ type: "text", text: m.content || "Учти приложенный файл при анализе." });
   return { role: "user", content: blocks };
 }
 
-// Читает файл в base64. Поддержка: картинки и PDF. Лимит 10 МБ.
+// Текстовые/markdown файлы читаем как обычный текст (не base64).
+const TEXT_EXT = /\.(md|markdown|txt|text)$/i;
+
+// Читает файл: картинки/PDF → base64, текст/markdown → обычный текст. Лимит 10 МБ.
 function readFilePart(file) {
   return new Promise((resolve) => {
-    const mediaType = file.type;
-    const kind = mediaType.startsWith("image/") ? "image" : mediaType === "application/pdf" ? "pdf" : null;
-    if (!kind || file.size > 10 * 1024 * 1024) return resolve(null);
+    if (file.size > 10 * 1024 * 1024) return resolve(null);
+    const mediaType = file.type || "";
     const reader = new FileReader();
+    reader.onerror = () => resolve(null);
+
+    // Текст/markdown — читаем содержимое, отдаём модели как текстовый блок.
+    if (mediaType.startsWith("text/") || TEXT_EXT.test(file.name)) {
+      reader.onload = () => resolve({ id: uid(), name: file.name, kind: "text", text: String(reader.result || "") });
+      reader.readAsText(file);
+      return;
+    }
+
+    // Картинки и PDF — нативные блоки Anthropic (base64).
+    const kind = mediaType.startsWith("image/") ? "image" : mediaType === "application/pdf" ? "pdf" : null;
+    if (!kind) return resolve(null);
     reader.onload = () => {
       const res = String(reader.result || "");
       const base64 = res.includes(",") ? res.slice(res.indexOf(",") + 1) : res;
       resolve({ id: uid(), name: file.name, kind, mediaType, data: base64 });
     };
-    reader.onerror = () => resolve(null);
     reader.readAsDataURL(file);
   });
 }
@@ -1002,7 +1017,7 @@ function UserBubble({ text, files }) {
           <div style={styles.userFiles}>
             {files.map((f) => (
               <span key={f.id} style={styles.userFileChip}>
-                {f.kind === "image" ? "🖼" : "📄"} {f.name}
+                {f.kind === "image" ? "🖼" : f.kind === "text" ? "📝" : "📄"} {f.name}
               </span>
             ))}
           </div>
@@ -1604,7 +1619,7 @@ function AttachBar({ attachments, onAdd, onRemove, disabled }) {
       <input
         ref={fileRef}
         type="file"
-        accept="image/png,image/jpeg,image/gif,image/webp,application/pdf"
+        accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,text/markdown,.md,.markdown,.txt"
         multiple
         style={{ display: "none" }}
         onChange={(e) => {
@@ -1622,7 +1637,7 @@ function AttachBar({ attachments, onAdd, onRemove, disabled }) {
       </button>
       {(attachments || []).map((f) => (
         <span key={f.id} style={styles.attachChip}>
-          {f.kind === "image" ? "🖼" : "📄"} <span style={styles.attachChipName}>{f.name}</span>
+          {f.kind === "image" ? "🖼" : f.kind === "text" ? "📝" : "📄"} <span style={styles.attachChipName}>{f.name}</span>
           <button style={styles.attachChipX} onClick={() => onRemove(f.id)} title="Убрать">
             ×
           </button>

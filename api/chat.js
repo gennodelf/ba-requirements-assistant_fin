@@ -1,5 +1,8 @@
 import { SYSTEM_PROMPT } from './systemPrompt.js'
 import { fetch as upstreamFetch, Agent } from 'undici'
+import { readdirSync, readFileSync, existsSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // Большие вложения (PDF/картинки) = крупный запрос. Стандартные 10 сек undici
 // на установку соединения не хватает — даём щедрые таймауты.
@@ -60,6 +63,30 @@ const FIRST_TURN_RULE = `ВНИМАНИЕ: это ПЕРВЫЙ ход диало
 (классификация, рекомендуемая структура, критичные вопросы). Запрещено @@DOCUMENT на этом ходу
 при любых условиях, даже если входной текст выглядит исчерпывающим.`
 
+// Справочные материалы владельца: всё из папки context/ (.md/.txt) один раз при старте
+// подмешивается в системный промпт (кэшируется вместе с ним). Файлы на «_»/«.» пропускаем
+// (например, _README.md). После добавления/удаления файла нужен передеплой (Render перезапустит модуль).
+function loadContextMaterials() {
+  try {
+    const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'context')
+    if (!existsSync(dir)) return ''
+    const files = readdirSync(dir)
+      .filter((n) => /\.(md|markdown|txt|text)$/i.test(n) && !n.startsWith('_') && !n.startsWith('.'))
+      .sort()
+    if (files.length === 0) return ''
+    return files.map((n) => `### Файл: ${n}\n\n${readFileSync(path.join(dir, n), 'utf8')}`).join('\n\n')
+  } catch {
+    return ''
+  }
+}
+
+const CONTEXT_MATERIALS = loadContextMaterials()
+const CONTEXT_BLOCK = CONTEXT_MATERIALS
+  ? `\n\n---\nСПРАВОЧНЫЕ МАТЕРИАЛЫ (контекст владельца)\n\nНиже — справочные документы: стандарты оформления, глоссарий, примеры требований. ` +
+    `Опирайся на них при анализе, и когда используешь что-то из них — ссылайся на источник по имени файла ` +
+    `(например: «согласно glossary.md…»). Это фон, а не задание: не пересказывай их без необходимости.\n\n${CONTEXT_MATERIALS}`
+  : ''
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed. Use POST.' })
@@ -113,7 +140,7 @@ export default async function handler(req, res) {
     const system = [
       {
         type: 'text',
-        text: SYSTEM_PROMPT + '\n\n' + STREAM_FORMAT,
+        text: SYSTEM_PROMPT + '\n\n' + STREAM_FORMAT + CONTEXT_BLOCK,
         cache_control: { type: 'ephemeral' },
       },
     ]

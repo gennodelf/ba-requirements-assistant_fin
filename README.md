@@ -63,7 +63,8 @@ flowchart TD
 - **Streaming output** with an elapsed timer.
 - **Document panel with versions** — rename / copy / delete each version; revisions are returned as a full updated document, so versions accumulate.
 - **Saved chats** in the browser — auto‑title, rename, delete one / delete all.
-- **File attachments** — images and PDF, sent as native Anthropic content blocks.
+- **File attachments** — images, PDF and text/markdown (e.g. attach your old requirements): images/PDF go as native Anthropic blocks, text/`.md` is read and passed inline.
+- **Reference context library** — drop `.md`/`.txt` files into `context/`; they're injected into the (cached) system prompt, so the agent always knows your glossary, standards and templates and cites them by file name.
 - **Multi‑user without accounts** — each browser is isolated via its own `localStorage`. Users either bring their own Anthropic key (stored locally, never sent to the owner) or sign in with a shared password (the server then uses the owner's key, which never reaches the browser).
 - **Prompt caching** of the large system prompt, and `max_tokens: 16000` so even very long documents complete in full.
 
@@ -85,6 +86,7 @@ ba-requirements-assistant/
 ├── api/
 │   ├── chat.js          # API handler: auth, prompt assembly, SSE streaming
 │   └── systemPrompt.js  # BA methodology — the agent's "brain"
+├── context/             # Always-on reference files (.md/.txt) → cached system prompt
 ├── src/
 │   ├── App.jsx          # Whole UI: chat, cards, document panel, sidebar
 │   ├── index.css · App.css
@@ -156,7 +158,8 @@ Pushing to the GitHub repo triggers an automatic redeploy.
 - **Стриминг ответа** с таймером ожидания.
 - **Панель документа с версиями** — переименование / копирование / удаление каждой версии; правка возвращается полным обновлённым документом, поэтому версии накапливаются.
 - **Сохранённые чаты** в браузере — авто‑заголовок, переименование, удаление одного / всех.
-- **Вложения** — картинки и PDF, отправляются нативными блоками Anthropic.
+- **Вложения** — картинки, PDF и текст/markdown (например, прикрепить старые требования): картинки/PDF идут нативными блоками, текст/`.md` читается и передаётся как текст.
+- **Библиотека контекста** — файлы `.md`/`.txt` в папке `context/` подмешиваются в (кэшируемый) системный промпт: агент всегда знает твой глоссарий/стандарты/шаблоны и ссылается на них по имени файла.
 - **Многопользовательский режим без аккаунтов** — каждый браузер изолирован своим `localStorage`. Пользователь либо вводит свой ключ Anthropic (хранится локально, владельцу не уходит), либо входит по паролю (тогда сервер использует ключ владельца, который никогда не попадает в браузер).
 - **Кэширование** большого системного промпта и `max_tokens: 16000`, чтобы даже очень длинные документы доходили целиком.
 
