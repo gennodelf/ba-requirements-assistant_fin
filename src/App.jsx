@@ -316,6 +316,33 @@ function readFilePart(file) {
   });
 }
 
+// Достаёт картинки из буфера обмена (⌘/Ctrl+V). Скриншоту даёт понятное имя.
+let pasteSeq = 0;
+function imagesFromClipboard(e) {
+  const items = e.clipboardData?.items;
+  if (!items) return [];
+  const out = [];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (it.kind === "file" && it.type.startsWith("image/")) {
+      const blob = it.getAsFile();
+      if (!blob) continue;
+      const ext = (blob.type.split("/")[1] || "png").replace("jpeg", "jpg");
+      out.push(new File([blob], `Скриншот ${++pasteSeq}.${ext}`, { type: blob.type }));
+    }
+  }
+  return out;
+}
+
+// onPaste для полей ввода: картинки из буфера крепим как вложения (как обычные файлы).
+function handleImagePaste(e, onAddFiles) {
+  const imgs = imagesFromClipboard(e);
+  if (imgs.length) {
+    e.preventDefault();
+    onAddFiles(imgs);
+  }
+}
+
 /* ============================== APP ================================ */
 
 export default function App() {
@@ -992,6 +1019,7 @@ function EmptyState({ value, setValue, onSubmit, attachments, onAddFiles, onRemo
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={onKeyDown}
+          onPaste={(e) => handleImagePaste(e, onAddFiles)}
           placeholder={SAMPLE_INPUT}
           style={styles.textarea}
         />
@@ -1600,6 +1628,7 @@ function Composer({ inputRef, value, setValue, loading, onSend, attachments, onA
           value={value}
           onChange={onChange}
           onKeyDown={onKeyDown}
+          onPaste={(e) => handleImagePaste(e, onAddFiles)}
           disabled={loading}
         />
         <button style={styles.composerBtn} onClick={onSend} disabled={loading}>
@@ -1631,7 +1660,7 @@ function AttachBar({ attachments, onAdd, onRemove, disabled }) {
         style={styles.attachBtn}
         onClick={() => fileRef.current?.click()}
         disabled={disabled}
-        title="Прикрепить картинку или PDF"
+        title="Прикрепить файл — или вставь скриншот через ⌘/Ctrl+V"
       >
         📎 файл
       </button>
